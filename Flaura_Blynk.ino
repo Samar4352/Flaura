@@ -1,62 +1,50 @@
-
 // Fill-in information from your Blynk Template here
-#define BLYNK_TEMPLATE_ID "???"
-#define BLYNK_DEVICE_NAME "Flaura Template Test"
+#define BLYNK_TEMPLATE_ID "YOUR_TEMPLATE_ID"
+#define BLYNK_DEVICE_NAME "Plant Watering System"
 
-#define BLYNK_FIRMWARE_VERSION        "0.1.0"
+#define BLYNK_FIRMWARE_VERSION "1.0.0"
 
 #define BLYNK_PRINT Serial
 //#define BLYNK_DEBUG
 
-//#define APP_DEBUG
-
-// Uncomment your board, or configure a custom board in Settings.h
-//#define USE_WROVER_BOARD
-
 #include "BlynkEdgent.h"
 #include <driver/adc.h>
 
-//Global variables for unit conversion
-#define hoursToSeconds 3600LL  //conversion factor from hours to seconds --> suffix LL for definition as 64bit constant
-#define secondsToMikroseconds  1000000LL //conversion factor from seconds to mikroseconds --> suffix LL for definition as 64bit constant
+// Conversion constants
+#define SECONDS_TO_MICROSECONDS 1000000LL
+#define MINUTES_TO_SECONDS 60
 
-//PIN Configuration
-//Conflict with analog ADC2 Pins and Wifi --> they stop working forever after wifi is startet --> only use ADC1 Pins (32,33,34,35,36,39) for analogread
-const byte buttonPin = 0;  //If changed, the pin also has to be changed in the Sleep function
-const byte batteryLevelPin = 32;  //voltage divider with 1MOhm and 30KOhm Resistor used to reduce maximum volatge at this pin (3.4V to 3.33V) --> at minimum operating voltage of 2.55V(???) readings at this pin would be 2,47V  
-const byte pumpPowerPin = 23; 
-const byte moistureSensorPowerPin = 19;
-const byte moistureSensorSignalPin = 33;
-const byte waterLevelGroundPin = 35; //lowest cable in tank, connect 100kohm Resistor to Ground parallel as pulldown resitor
-const byte waterLevelPin[] = {13, 14, 27, 26, 25}; //Pins for Sensores in Tank --> Order: 100%, 75%, 50%, 25%, 10% 
+// Pin Configuration
+// Note: Use ADC1 pins (32,33,34,35,36,39) for analog readings as ADC2 conflicts with WiFi
+const byte BUTTON_PIN = 0;
+const byte BATTERY_LEVEL_PIN = 32;  // Voltage divider with 1M and 30K ohm resistors
+const byte PUMP_POWER_PIN = 23;
+const byte MOISTURE_SENSOR_POWER_PIN = 19;
+const byte MOISTURE_SENSOR_SIGNAL_PIN = 33;
+const byte WATER_LEVEL_GROUND_PIN = 35; // Needs 100k pulldown resistor
+const byte WATER_LEVEL_PINS[] = {13, 14, 27, 26, 25}; // 100%, 75%, 50%, 25%, 10%
 
+// RTC Memory values (preserved during deep sleep)
+RTC_DATA_ATTR int bootCount = 0;
+RTC_DATA_ATTR int sleepDuration = 30;  // Sleep time in minutes
+RTC_DATA_ATTR int soilMoistureCritical = 25;  // Critical soil moisture % to trigger watering
+RTC_DATA_ATTR int waterAmount = 20;  // Amount of water to dispense in mL
+RTC_DATA_ATTR int pumpPowerMin = 150;
+RTC_DATA_ATTR int pumpPowerMax = 230;
+RTC_DATA_ATTR int waterFlowCalibration = 250;  // mL per minute at max power
+RTC_DATA_ATTR int soilMoistureCalibrationAir = 3180;
+RTC_DATA_ATTR int soilMoistureCalibrationWater = 1320;
+RTC_DATA_ATTR int waterLevelSensorThreshold = 400;
 
-
-//Config values --> can be changed in the Blynk app
-//RTC Memory values --> these are preserved during deepsleep but lost when reseting or powering off the esp32
-RTC_DATA_ATTR int bootCount = 0; 
-RTC_DATA_ATTR int sleepDuration = 24;  //sleep time in minutes
-RTC_DATA_ATTR int soilMoistureCritical = 25;  //critical soil moisture in % that initiates watering process
-RTC_DATA_ATTR int waterAmount = 20; 
-RTC_DATA_ATTR int pumpPowerMin = 150; 
-RTC_DATA_ATTR int pumpPowerMax = 230; 
-RTC_DATA_ATTR int waterFlowCalibration = 250; 
-RTC_DATA_ATTR int soilMoistureCalibrationAir = 3180; 
-RTC_DATA_ATTR int soilMoistureCalibrationWater = 1320; 
-RTC_DATA_ATTR int waterLevelSensorThreshold = 400; 
-
-
-//Flag values (boolean) that are received from the Blynk app --> get reset after reboot or deepsleep
-int pumpPowerMinCalibrationFlag = 0; 
+// Flag values from Blynk app (reset after reboot/sleep)
+int pumpPowerMinCalibrationFlag = 0;
 int pumpPowerMaxCalibrationFlag = 0;
-int waterFlowCalibrationFlag = 0; 
-int soilMoistureCalibrationAirFlag = 0; 
+int waterFlowCalibrationFlag = 0;
+int soilMoistureCalibrationAirFlag = 0;
 int soilMoistureCalibrationWaterFlag = 0;
-int waterLevelSensorRawReadingsFlag = 0; 
+int waterLevelSensorRawReadingsFlag = 0;
 
-
-
-//Global variables for state machine operation
+// State machine variables
 byte downloadBlynkState = 0;
 byte uploadBlynkState = 0;
 byte batteryLevelMeasureState = 0;
@@ -65,588 +53,598 @@ byte soilMoistureMeasureState = 0;
 byte pumpOperationState = 0;
 byte routineState = 0;
 
-
-//Global variables (Blynk related)
+// Blynk related variables
 int blynkSyncCounter = 0;
-int blynkSyncNumber = 15; //number of values that have to be downloaded from Blynk server during synchronisation
-boolean blynkSyncRequired = false;  //flag if sync with Blynk server is required 
+int blynkSyncNumber = 15;  // Number of values to download from Blynk server
+boolean blynkSyncRequired = false;
 boolean BlynkInitialized = false;
 
-
-//Other global variables
-esp_sleep_wakeup_cause_t deepsleepWakeupReason;
-const int sensorMeasureWaitingTime = 200;   //200ms between measurements --> same for all measurement functions
+// Sensor reading variables
+esp_sleep_wakeup_cause_t wakeupReason;
+const int MEASURE_WAIT_TIME = 200;  // ms between measurements
 int batteryLevelReading[10];
 int batteryLevelAverage = 0;
 float batteryLevelVoltage = 0;
 int batteryLevelPercentage = 0;
 int waterLevelSensorReading[5];
 int waterLevelPercentage = 0;
-const int waterLevelAssociated[] = {100, 75, 50, 25, 10, 0}; //water levels in % associated with each pin
+const int WATER_LEVEL_VALUES[] = {100, 75, 50, 25, 10, 0};  // Water levels in % for each pin
 int soilMoistureReading[10];
 int soilMoistureAverage = 0;
-int soilMoistureCalibrated = 0; 
+int soilMoistureCalibrated = 0;
 int soilMoisturePercentage = 0;
 int pumpActivityFlag = 0;
 
+// Pump PWM settings
+const int PUMP_PWM_FREQUENCY = 490;
+const int PUMP_PWM_CHANNEL = 0;
+const int PUMP_PWM_RESOLUTION = 8;  // 8-bit = 0-255
 
+// BlynkTimer for safety timeout
+BlynkTimer timer;
 
-void setup(){  
-  delay(500); //delay here is required to wake up reliably
-  pinMode(buttonPin, INPUT); 
-  pinMode(batteryLevelPin, INPUT);
-  pinMode(pumpPowerPin, OUTPUT);
-  pinMode(moistureSensorSignalPin, INPUT);
-  pinMode(moistureSensorPowerPin, OUTPUT);
-  pinMode(waterLevelGroundPin, INPUT);    //cathode --> only here no corrosion
+void setup() {
+  delay(500);  // Required for reliable wake-up
+  
+  // Initialize pins
+  pinMode(BUTTON_PIN, INPUT);
+  pinMode(BATTERY_LEVEL_PIN, INPUT);
+  pinMode(PUMP_POWER_PIN, OUTPUT);
+  pinMode(MOISTURE_SENSOR_SIGNAL_PIN, INPUT);
+  pinMode(MOISTURE_SENSOR_POWER_PIN, OUTPUT);
+  pinMode(WATER_LEVEL_GROUND_PIN, INPUT);
+  
   for (int i = 0; i < 5; i++) {
-    pinMode(waterLevelPin[i], INPUT);    //corrosion on these anodic pins
+    pinMode(WATER_LEVEL_PINS[i], INPUT);
   }
+  
   pinMode(LED_BUILTIN, OUTPUT);
-  //digitalWrite(LED_BUILTIN, LOW);   // turn the LED ON (strangely Builddin LED is active LOW) --> turns off when entering deepsleep
+  
   Serial.begin(115200);
-  delay(100); //wait for serial monitor to open
+  delay(100);  // Wait for serial monitor
+  
   bootCount++;
-  BLYNK_LOG("Bootcount: %i", bootCount);
-  timer.setTimeout(120000L, DeepSleep);  // Setup DeepSleep function to be called after 120000 second --> go to deep sleep if anything takes to long
+  Serial.printf("Boot count: %d\n", bootCount);
+  
+  // Setup safety timeout of 2 minutes
+  timer.setTimeout(120000L, enterDeepSleep);
+  
+  // Start the main routine
   routineState = 1;
 }
 
+void loop() {
+  // State machine execution
+  downloadFromBlynk();
+  uploadToBlynk();
+  measureBatteryLevel();
+  measureWaterLevel();
+  measureSoilMoisture();
+  operatePump();
+  executeRoutine();
+  
+  if (BlynkInitialized) {
+    BlynkEdgent.run();
+  }
+  
+  timer.run();  // Run timer for safety timeout
+}
 
-
-void routine(){
-  switch(routineState){
-    case 1:  //download new config values from Blynk if sync is required
+void executeRoutine() {
+  switch (routineState) {
+    case 1:  // Download config from Blynk
       downloadBlynkState = 1;
-      routineState++;     
+      routineState++;
       break;
-    case 2:  //start measuring processes
-      if(downloadBlynkState == 100){
+      
+    case 2:  // Wait for download to complete, then start measurements
+      if (downloadBlynkState == 100) {
         batteryLevelMeasureState = 1;
         waterLevelMeasureState = 1;
         soilMoistureMeasureState = 1;
         routineState++;
       }
       break;
-    case 3:
-      if(batteryLevelMeasureState == 100 && waterLevelMeasureState == 100 && soilMoistureMeasureState == 100){
-        serialPrintValues();  //print measurement values to serial monitor
-        pumpOperationState = 1; //start the pump
+      
+    case 3:  // Wait for measurements to complete, then operate pump if needed
+      if (batteryLevelMeasureState == 100 && waterLevelMeasureState == 100 && soilMoistureMeasureState == 100) {
+        printSensorValues();
+        pumpOperationState = 1;
         routineState++;
       }
       break;
-    case 4:
-      if(pumpOperationState == 100){
-        uploadBlynkState = 1;  //upload new values
+      
+    case 4:  // Wait for pump operation to complete, then upload data
+      if (pumpOperationState == 100) {
+        uploadBlynkState = 1;
         routineState++;
       }
       break;
-    case 5:
-      if(uploadBlynkState == 100){
-        DeepSleep();
-      }
-      break;
-  } 
-}
-
-
-
-
-
-void downloadBlynk(){
-  switch(downloadBlynkState){
-    case 1:
-     // esp_sleep_wakeup_cause_t deepsleepWakeupReason = esp_sleep_get_wakeup_cause(); //get wakeup reason 
-     deepsleepWakeupReason = esp_sleep_get_wakeup_cause(); //get wakeup reason 
-      if(deepsleepWakeupReason == ESP_SLEEP_WAKEUP_EXT0 || bootCount == 1){ //if this is the first boot or if button was used to wake up manually
-        BLYNK_LOG("This is the first boot of the microcontroller or it was manually woken up from standby mode by button press");
-        blynkSyncRequired = true;
-        BlynkEdgent.begin(); 
-        BlynkInitialized = true;
-        downloadBlynkState++;
-      }
-      else{ 
-        BLYNK_LOG("The microcontroller was regularly woken up from standby mode by the timer - synchronisation with Blynk server is not necassary");
-        downloadBlynkState = 100; //mark task as finished
-      }
-      break;
-    case 2:
-      if(blynkSyncCounter == blynkSyncNumber){  //if all values have been updated
-        BLYNK_LOG("Synchronisation finished!");
-        blynkSyncRequired = false; //reset flag
-        blynkSyncCounter = 0; //reset counter
-        Blynk.disconnect();
-        WiFi.disconnect();
-        BlynkInitialized = false;
-        downloadBlynkState = 100; //mark task as finished
-      }
-      else{
-        BLYNK_LOG("Waiting for synchronisation to complete...");
+      
+    case 5:  // Wait for upload to complete, then enter deep sleep
+      if (uploadBlynkState == 100) {
+        enterDeepSleep();
       }
       break;
   }
 }
 
-
-
-void uploadBlynk(){
-  static unsigned long previousUploadCheckTime = 0;
-  switch(uploadBlynkState){
+void downloadFromBlynk() {
+  switch (downloadBlynkState) {
     case 1:
-      BLYNK_LOG("Uploading new values to Blynk...");
+      wakeupReason = esp_sleep_get_wakeup_cause();
+      
+      // First boot or button wakeup requires Blynk sync
+      if (wakeupReason == ESP_SLEEP_WAKEUP_EXT0 || bootCount == 1) {
+        Serial.println("First boot or manual wakeup - synchronizing with Blynk server");
+        blynkSyncRequired = true;
+        BlynkEdgent.begin();
+        BlynkInitialized = true;
+        downloadBlynkState++;
+      } else {
+        Serial.println("Timer wakeup - no synchronization needed");
+        downloadBlynkState = 100;  // Mark as finished
+      }
+      break;
+      
+    case 2:
+      if (blynkSyncCounter == blynkSyncNumber) {  // All values updated
+        Serial.println("Synchronization complete");
+        blynkSyncRequired = false;
+        blynkSyncCounter = 0;
+        Blynk.disconnect();
+        WiFi.disconnect();
+        BlynkInitialized = false;
+        downloadBlynkState = 100;  // Mark as finished
+      } else {
+        Serial.println("Waiting for synchronization to complete...");
+      }
+      break;
+  }
+}
+
+void uploadToBlynk() {
+  static unsigned long previousUploadCheckTime = 0;
+  
+  switch (uploadBlynkState) {
+    case 1:
+      Serial.println("Uploading data to Blynk...");
       BlynkEdgent.begin();
       BlynkInitialized = true;
       uploadBlynkState++;
       break;
+      
     case 2:
-      if (millis() - previousUploadCheckTime >= 3000){ //check every 3 seconds if boot count has been uploaded yet
+      if (millis() - previousUploadCheckTime >= 3000) {  // Check every 3 seconds
         previousUploadCheckTime = millis();
-        Blynk.syncVirtual(V104); //needed to trigger BLYNK_WRITE(V104)
+        Blynk.syncVirtual(V104);  // Triggers BLYNK_WRITE(V104)
       }
       break;
   }
 }
 
-
-
-
-
-BLYNK_CONNECTED() {  //gets called as soon as connection to Blynk server is established
-  if(blynkSyncRequired == true){
-    BLYNK_LOG("Synchronisation with Blynk server started");
-    Blynk.syncVirtual(V105, V106, V107, V0, V1, V2, V10, V3, V4, V5, V6, V7, V8, V9, V11); //get latest config values from Blynk server    
-  }
-  else{
-    BLYNK_LOG("Upload of new values to Blynk server started");
-    Blynk.virtualWrite(V102, batteryLevelPercentage);
-    Blynk.virtualWrite(V101, waterLevelPercentage);   
-    if(waterLevelSensorRawReadingsFlag == 1){
-      Blynk.virtualWrite(V12, waterLevelSensorReading[0]); //upload raw reading on 100% pin
-      Blynk.virtualWrite(V13, waterLevelSensorReading[1]); //upload raw reading on 75% pin
-      Blynk.virtualWrite(V14, waterLevelSensorReading[2]); //upload raw reading on 50% pin
-      Blynk.virtualWrite(V15, waterLevelSensorReading[3]); //upload raw reading on 25% pin
-      Blynk.virtualWrite(V16, waterLevelSensorReading[4]); //upload raw reading on 10% pin
-      Blynk.virtualWrite(V11, 0); //upload zero to reset flag on server if it was set 
-    }
-    Blynk.virtualWrite(V100, soilMoisturePercentage);
-    if(soilMoistureCalibrationAirFlag == 1){
-      Blynk.virtualWrite(V5, soilMoistureCalibrationAir);
-      Blynk.virtualWrite(V7, 0); //upload zero to reset flag on server if it was set     
-    }
-    if(soilMoistureCalibrationWaterFlag == 1){
-      Blynk.virtualWrite(V6, soilMoistureCalibrationWater);
-      Blynk.virtualWrite(V8, 0); //upload zero to reset flag on server if it was set  
-    }
-    Blynk.virtualWrite(V103, pumpActivityFlag);
-    if(pumpPowerMinCalibrationFlag == 1 || pumpPowerMaxCalibrationFlag == 1 || waterFlowCalibrationFlag == 1){ //upload zero to reset flags on server if any of them was set
-      Blynk.virtualWrite(V4, 0); 
-      Blynk.virtualWrite(V2, 0); 
-      Blynk.virtualWrite(V10, 0);
-    }
-    Blynk.virtualWrite(V104, bootCount);  
-  }
-}
-
-
-
-
-
-
-BLYNK_WRITE(V104){   //gets called by Blynk.syncVirtual function
-  int bootCountServer = param.asInt(); // Get value as int
-  if(bootCount == bootCountServer){ //if boot count on device and server are matching --> upload has finished
-    BLYNK_LOG("Upload of new values to Blynk server confirmed");
-    uploadBlynkState = 100; //mark upload task as finsihed
-  }
-}
-
-BLYNK_WRITE(V105){   //gets called by Blynk.syncVirtual function
-  sleepDuration = param.asInt(); // Get value as int
-  BLYNK_LOG("New value for sleep duration received: %i", sleepDuration);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V106){   //gets called by Blynk.syncVirtual function
-  soilMoistureCritical = param.asInt(); // Get value as int
-  BLYNK_LOG("New value for critical soil moisture received: %i", soilMoistureCritical);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V107){   //gets called by Blynk.syncVirtual function
-  waterAmount = param.asInt(); // Get value as int
-  BLYNK_LOG("New value for water amount received: %i", waterAmount);
-  blynkSyncCounter++;
-}
-
-
-BLYNK_WRITE(V0){   //gets called by Blynk.syncVirtual function
-  pumpPowerMin = param.asInt(); // Get value as int
-  BLYNK_LOG("New value for minimal pump power received: %i", pumpPowerMin);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V1){   //gets called by Blynk.syncVirtual function
-  pumpPowerMax = param.asInt(); // Get value as int
-  BLYNK_LOG("New value for maximum pump power received: %i", pumpPowerMax);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V2){   //gets called by Blynk.syncVirtual function
-  pumpPowerMinCalibrationFlag = param.asInt(); // Get value as int
-  BLYNK_LOG("New flag for minimum pump power calibration received: %i", pumpPowerMinCalibrationFlag);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V10){   //gets called by Blynk.syncVirtual function
-  pumpPowerMaxCalibrationFlag = param.asInt(); // Get value as int
-  BLYNK_LOG("New flag for maximum pump power calibration received: %i", pumpPowerMaxCalibrationFlag);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V3){   //gets called by Blynk.syncVirtual function
-  waterFlowCalibration= param.asInt(); // Get value as int
-  BLYNK_LOG("New value for water flow calibration received: %i", waterFlowCalibration);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V4){   //gets called by Blynk.syncVirtual function
-  waterFlowCalibrationFlag= param.asInt(); // Get value as int
-  BLYNK_LOG("New flag for water flow calibration received: %i", waterFlowCalibrationFlag);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V5){   //gets called by Blynk.syncVirtual function
-  soilMoistureCalibrationAir= param.asInt(); // Get value as int
-  BLYNK_LOG("New value for soil moisture calibration in air received: %i", soilMoistureCalibrationAir);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V6){   //gets called by Blynk.syncVirtual function
-  soilMoistureCalibrationWater= param.asInt(); // Get value as int
-  BLYNK_LOG("New value for soil moisture calibration in water received: %i", soilMoistureCalibrationWater);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V7){   //gets called by Blynk.syncVirtual function
-  soilMoistureCalibrationAirFlag= param.asInt(); // Get value as int
-  BLYNK_LOG("New flag for soil moisture calibration in air received: %i", soilMoistureCalibrationAirFlag);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V8){   //gets called by Blynk.syncVirtual function
-  soilMoistureCalibrationWaterFlag= param.asInt(); // Get value as int
-  BLYNK_LOG("New flag for soil moisture calibration in water received: %i", soilMoistureCalibrationWaterFlag);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V9){   //gets called by Blynk.syncVirtual function
-  waterLevelSensorThreshold= param.asInt(); // Get value as int
-  BLYNK_LOG("New value for water level sensor threshold received: %i", waterLevelSensorThreshold);
-  blynkSyncCounter++;
-}
-
-BLYNK_WRITE(V11){   //gets called by Blynk.syncVirtual function
-  waterLevelSensorRawReadingsFlag= param.asInt(); // Get value as int
-  BLYNK_LOG("New flag for raw water level sensor readings received: %i", waterLevelSensorRawReadingsFlag);
-  blynkSyncCounter++;
-}
-
-
-
-
-
-
-
-
-
-void batteryLevelMeasure() {
-  static int batteryReadingCounter = 0;
-  static unsigned long previousBatteryLevelMeasureTime = 0;
-  switch(batteryLevelMeasureState){
-    case 1:  //do this on first run of this task -> reset values
-      batteryLevelAverage = 0; 
-      batteryReadingCounter = 0; 
+void measureBatteryLevel() {
+  static int readingIndex = 0;
+  static unsigned long previousMeasureTime = 0;
+  
+  switch (batteryLevelMeasureState) {
+    case 1:  // Initialize
+      batteryLevelAverage = 0;
+      readingIndex = 0;
       batteryLevelMeasureState++;
       break;
-    case 2: 
-      if(batteryReadingCounter < 10 && millis() - previousBatteryLevelMeasureTime >= sensorMeasureWaitingTime){ //do 10 measurement repetitions every few milliseconds
-        previousBatteryLevelMeasureTime = millis();  //reset measure timer
-        batteryLevelReading[batteryReadingCounter] = analogRead(batteryLevelPin);
-        batteryLevelAverage += batteryLevelReading[batteryReadingCounter]; //add current sensor reading to average
-        batteryReadingCounter++;
+      
+    case 2:  // Take 10 readings
+      if (readingIndex < 10 && millis() - previousMeasureTime >= MEASURE_WAIT_TIME) {
+        previousMeasureTime = millis();
+        batteryLevelReading[readingIndex] = analogRead(BATTERY_LEVEL_PIN);
+        batteryLevelAverage += batteryLevelReading[readingIndex];
+        readingIndex++;
       }
-      if(batteryReadingCounter == 10){
+      
+      if (readingIndex == 10) {
         batteryLevelMeasureState++;
       }
-      break;  
-    case 3: //after all measurement repetitions have been performed
-      batteryLevelAverage = batteryLevelAverage / 10;
-      batteryLevelVoltage = batteryLevelAverage / 4096.0 * 4.62;  //conversion of raw reading to voltage -> multiply with 3.3 by default because of 3.3V basic voltage of the ESP32 --> here its multiplyed by 1.33 (=4.39) because of the voltage divider in the circuit and corrected with an additional correction factor => 4.62   
-      batteryLevelPercentage = 2808.3808 * pow(batteryLevelVoltage, 4) - 43560.9157 * pow(batteryLevelVoltage, 3) + 252848.5888 * pow(batteryLevelVoltage, 2) - 650767.4615 * batteryLevelVoltage + 626532.9;   //conversion from voltage to percentage by using a fitting function for the charge-voltage-curve of an LiPo battery
-      if (batteryLevelVoltage > 4.2){
-        batteryLevelPercentage = 100;
-      }
-      if (batteryLevelVoltage < 3.5){
-        batteryLevelPercentage = 0;
-      }
-      batteryLevelMeasureState = 100; //mark task as finsihed
+      break;
+      
+    case 3:  // Calculate battery level
+      batteryLevelAverage /= 10;
+      
+      // Convert ADC value to voltage (adjust multiplier based on your voltage divider)
+      batteryLevelVoltage = batteryLevelAverage / 4096.0 * 4.62;
+      
+      // Convert voltage to percentage using LiPo discharge curve
+      batteryLevelPercentage = calculateBatteryPercentage(batteryLevelVoltage);
+      
+      batteryLevelMeasureState = 100;  // Mark as finished
       break;
   }
 }
 
+int calculateBatteryPercentage(float voltage) {
+  // Simplified battery percentage calculation
+  if (voltage > 4.2) return 100;
+  if (voltage < 3.5) return 0;
+  
+  // Linear approximation between 3.5V (0%) and 4.2V (100%)
+  return (voltage - 3.5) * 142.85;
+}
 
-
-
-
-
-
-
-void waterLevelMeasure() {
-  static int waterLevelPinIndex = 0;
-  static unsigned long previousWaterLevelMeasureTime = 0;
-  switch(waterLevelMeasureState){
-    case 1:  //do this on first run of this task -> reset values
-      waterLevelPinIndex = 0;
-      for (int n = 0; n < 5; n++) {
-        waterLevelSensorReading[n] = 0;
+void measureWaterLevel() {
+  static int pinIndex = 0;
+  static unsigned long previousMeasureTime = 0;
+  
+  switch (waterLevelMeasureState) {
+    case 1:  // Initialize
+      pinIndex = 0;
+      for (int i = 0; i < 5; i++) {
+        waterLevelSensorReading[i] = 0;
       }
       waterLevelPercentage = 0;
       waterLevelMeasureState++;
       break;
-    case 2: 
-      if (waterLevelPinIndex < 5){  //do this up to 5 times (once for each pin) --> Start measuring from top pins and ends at bottom pins, so pins under water are tested less frequently --> less corrosion on these pins
-        pinMode(waterLevelPin[waterLevelPinIndex], OUTPUT); //set specific water level pin under test to output
-        digitalWrite(waterLevelPin[waterLevelPinIndex], HIGH);  //activate power on specific water level pin under test
-        if (millis() - previousWaterLevelMeasureTime >= sensorMeasureWaitingTime) { //wait for the voltage on the pin to rise
-          previousWaterLevelMeasureTime = millis();  //reset timer
-          waterLevelSensorReading[waterLevelPinIndex] = analogRead(waterLevelGroundPin);  //read voltage on ground pin -> if ground and the specific pin under test are connected by water in the tank -> high value
-          digitalWrite(waterLevelPin[waterLevelPinIndex], LOW);  //cut off power to pin
-          pinMode(waterLevelPin[waterLevelPinIndex], INPUT);  //set pin to input
-          if(waterLevelSensorReading[waterLevelPinIndex] >= waterLevelSensorThreshold && waterLevelPercentage == 0){  // if the specific pin under test and ground pin ARE connectet AND current water level hasent been found yet
-            waterLevelPercentage = waterLevelAssociated[waterLevelPinIndex]; //this is the current Water level
+      
+    case 2:  // Test each water level pin
+      if (pinIndex < 5) {
+        pinMode(WATER_LEVEL_PINS[pinIndex], OUTPUT);
+        digitalWrite(WATER_LEVEL_PINS[pinIndex], HIGH);
+        
+        if (millis() - previousMeasureTime >= MEASURE_WAIT_TIME) {
+          previousMeasureTime = millis();
+          waterLevelSensorReading[pinIndex] = analogRead(WATER_LEVEL_GROUND_PIN);
+          digitalWrite(WATER_LEVEL_PINS[pinIndex], LOW);
+          pinMode(WATER_LEVEL_PINS[pinIndex], INPUT);
+          
+          // If this pin is underwater and we haven't found the water level yet
+          if (waterLevelSensorReading[pinIndex] >= waterLevelSensorThreshold && waterLevelPercentage == 0) {
+            waterLevelPercentage = WATER_LEVEL_VALUES[pinIndex];
           }
-          if(waterLevelSensorRawReadingsFlag == 0 && waterLevelPercentage != 0){  //if raw values should NOT be printed AND current water level has been found
-              waterLevelMeasureState = 100; //mark task as finished
+          
+          // Skip rest of pins if not collecting raw readings and level found
+          if (waterLevelSensorRawReadingsFlag == 0 && waterLevelPercentage != 0) {
+            waterLevelMeasureState = 100;  // Mark as finished
+            return;
           }
-          waterLevelPinIndex++; //check next pin
+          
+          pinIndex++;
         }
-      }
-      else{
-        waterLevelMeasureState = 100; //mark task as finished
+      } else {
+        waterLevelMeasureState = 100;  // Mark as finished
       }
       break;
   }
 }
 
-
-
-
-
-
-
-
-void soilMoistureMeasure() {
-  static int soilMoistureReadingCounter = 0;
-  static unsigned long previousSoilMoistureSensorMeasureTime = 0;
-  switch(soilMoistureMeasureState){
-    case 1:  //do this on first run of this task -> reset values
-      digitalWrite(moistureSensorPowerPin, HIGH);  //power up the sensor
-      soilMoistureReadingCounter = 0; 
-      soilMoistureAverage = 0; 
-      previousSoilMoistureSensorMeasureTime = millis(); //reset measurement timer -> to wait a short time before measuring for the voltage on the sensor to rise
+void measureSoilMoisture() {
+  static int readingIndex = 0;
+  static unsigned long previousMeasureTime = 0;
+  
+  switch (soilMoistureMeasureState) {
+    case 1:  // Initialize
+      digitalWrite(MOISTURE_SENSOR_POWER_PIN, HIGH);  // Power up sensor
+      readingIndex = 0;
+      soilMoistureAverage = 0;
+      previousMeasureTime = millis();
       soilMoistureMeasureState++;
       break;
-    case 2:
-      if(soilMoistureReadingCounter < 10 && millis() - previousSoilMoistureSensorMeasureTime >= sensorMeasureWaitingTime){  //do 10 measurement repetitions every few milliseconds
-        previousSoilMoistureSensorMeasureTime = millis();  //reset measure timer
-        soilMoistureReading[soilMoistureReadingCounter] = analogRead(moistureSensorSignalPin);
-        soilMoistureAverage += soilMoistureReading[soilMoistureReadingCounter]; //add current sensor reading to average   
-        soilMoistureReadingCounter++;
+      
+    case 2:  // Take 10 readings
+      if (readingIndex < 10 && millis() - previousMeasureTime >= MEASURE_WAIT_TIME) {
+        previousMeasureTime = millis();
+        soilMoistureReading[readingIndex] = analogRead(MOISTURE_SENSOR_SIGNAL_PIN);
+        soilMoistureAverage += soilMoistureReading[readingIndex];
+        readingIndex++;
       }
-      if(soilMoistureReadingCounter == 10){
+      
+      if (readingIndex == 10) {
         soilMoistureMeasureState++;
       }
-      break;  
-    case 3: //after all measurement repetitions have been performed
-      digitalWrite(moistureSensorPowerPin, LOW); //cut off power to the sensor
-      soilMoistureAverage = soilMoistureAverage / 10; //divide the sum of the readings by the number of measurement repetitions
-      if(soilMoistureCalibrationAirFlag == 1){
+      break;
+      
+    case 3:  // Calculate soil moisture
+      digitalWrite(MOISTURE_SENSOR_POWER_PIN, LOW);  // Power down sensor
+      soilMoistureAverage /= 10;
+      
+      // Update calibration if flags are set
+      if (soilMoistureCalibrationAirFlag == 1) {
         soilMoistureCalibrationAir = soilMoistureAverage;
       }
-      if(soilMoistureCalibrationWaterFlag == 1){
+      if (soilMoistureCalibrationWaterFlag == 1) {
         soilMoistureCalibrationWater = soilMoistureAverage;
       }
-      soilMoistureCalibrated = map(soilMoistureAverage, soilMoistureCalibrationWater, soilMoistureCalibrationAir, 1320, 3173);    //calibrate new value with map function
-      soilMoisturePercentage = (178147020.5 - 52879.727 * soilMoistureCalibrated) / (1 - 428.814 * soilMoistureCalibrated + 0.9414 * pow(soilMoistureCalibrated, 2)); //Fitting function to calculate %-value
-      if (soilMoisturePercentage > 100) {
-        soilMoisturePercentage = 100; 
-      }
-      if (soilMoisturePercentage < 0) {
-        soilMoisturePercentage = 0; 
-      }
-      soilMoistureMeasureState = 100; //mark task as finsihed
+      
+      // Map sensor reading to calibrated range
+      soilMoistureCalibrated = map(soilMoistureAverage, soilMoistureCalibrationWater, soilMoistureCalibrationAir, 1320, 3173);
+      
+      // Calculate percentage using simplified formula
+      soilMoisturePercentage = map(soilMoistureCalibrated, soilMoistureCalibrationAir, soilMoistureCalibrationWater, 0, 100);
+      
+      // Constrain to valid range
+      soilMoisturePercentage = constrain(soilMoisturePercentage, 0, 100);
+      
+      soilMoistureMeasureState = 100;  // Mark as finished
       break;
   }
 }
 
-
-
-
-
-
-
-void serialPrintValues() {
-  for (int n = 0; n < 10; n++) {
-    BLYNK_LOG("Raw battery level reading %i: %i", n + 1, batteryLevelReading[n]);
-  }
-  BLYNK_LOG("Average battery level reading: %i", batteryLevelAverage);
-  BLYNK_LOG("Battery level voltage: %f V", batteryLevelVoltage);
-  BLYNK_LOG("Battery level percentage: %i %%", batteryLevelPercentage);
-  if(waterLevelSensorRawReadingsFlag == 1){
-    for (int n = 0; n < 5; n++) {
-      BLYNK_LOG("Raw reading for pin on water level %i: %i", waterLevelAssociated[n], waterLevelSensorReading[n]);
-    }
-  }
-  BLYNK_LOG("Water level percentage: %i %%", waterLevelPercentage);
-  for (int n = 0; n < 10; n++) {
-    BLYNK_LOG("Raw soil moisture reading %i: %i", n + 1, soilMoistureReading[n]);
-  }
-  BLYNK_LOG("Average soil moisture reading: %i", soilMoistureAverage);
-  BLYNK_LOG("Calibrated soil moisture reading: %i", soilMoistureCalibrated);
-  BLYNK_LOG("Soil moisture percentage: %i", soilMoisturePercentage);
-}
-
-
-
-
-
-
-
-
-
-
-
+void operatePump() {
+  static float batteryCompensation;
+  static int pumpDuration = 10000;  // Default: 10 seconds
+  static unsigned long pumpStartTime;
+  static int dutyCycle;
+  static int minDutyCycle;
+  static int maxDutyCycle;
+  static int dutyCycleStepTime;
+  static unsigned long lastDutyCycleStepTime;
   
-
-void pumpOperation(){
-  static const int pumpPwmFrequency = 490;      //frequency of the PWM signal in Hertz -> maximum resolution depends on frequency (higher frequency means lower possible resolution -> max freq [in Hz] = 80000000/(2^resolution) )  -> frequency effects noise of the pump            
-  static const int pumpPwmChannel = 0;       //choose a PWM channel -> There are 16 channels from 0 to 15
-  static const int pumpPwmResolution = 8;   //resolution for the duty cyle of the PWM signal in bit, higher resolution means finer adjustment -> duty cycle range from 0 to (2^resolution) - 1) -> e.g. 8 bit => duty cycle between 0 and 255
-  static float batteryVoltageCompensationValue;  //compensation value to always power the pump with 3.5V (lowest possible battery voltage), independet of the actual battery voltage 
-  static int pumpOperationDuration = 10000; // set default pump duration to 10000 milliseconds (10 seconds)
-  static unsigned long pumpOperationTime;  //starting time of the pump operation
-  static int pumpPwmDutyCycle;          //duty cycle of the PWM signal -> controls power of the pump
-  static int pumpPwmDutyCycleMin;     //starting duty cycle
-  static int pumpPwmDutyCycleMax;     //ending duty cycle
-  static int dutyCycleRestTime;       //time after that duty cycle is increased by 1
-  static unsigned long previousDutyCycleIncreaseTime;  //last time the duty cycle was increased 
-  switch(pumpOperationState){
-    case 1:
-      if(soilMoisturePercentage <= soilMoistureCritical || pumpPowerMinCalibrationFlag == 1 || pumpPowerMaxCalibrationFlag == 1 || waterFlowCalibrationFlag == 1){ //check if pump needs to be started
-        if(waterLevelPercentage < 10){  //if the water level is less then 10% 
-          BLYNK_LOG("Water level is too low - minimum water level for pump operation is 10%");
-          pumpOperationState = 100; //mark task as finished
+  switch (pumpOperationState) {
+    case 1:  // Check if pump should run
+      if (soilMoisturePercentage <= soilMoistureCritical || 
+          pumpPowerMinCalibrationFlag == 1 || 
+          pumpPowerMaxCalibrationFlag == 1 || 
+          waterFlowCalibrationFlag == 1) {
+            
+        // Check water and battery levels
+        if (waterLevelPercentage < 10) {
+          Serial.println("Water level too low - minimum 10% required");
+          pumpOperationState = 100;  // Skip pump operation
         }
-        if(batteryLevelPercentage < 10){  //if the battery level is less then 10% 
-          BLYNK_LOG("Battery level is too low - minimum battery level for pump operation is 10%");
-          pumpOperationState = 100; //mark task as finished     
+        else if (batteryLevelPercentage < 10) {
+          Serial.println("Battery level too low - minimum 10% required");
+          pumpOperationState = 100;  // Skip pump operation
         }
-        if(waterLevelPercentage >= 10 && batteryLevelPercentage >= 10){
-          pumpOperationState++;
+        else {
+          pumpOperationState++;  // Continue to pump setup
         }
       }
-      else{
-        BLYNK_LOG("No need to start water pump"); 
-        pumpOperationState = 100; //mark task as finished 
+      else {
+        Serial.println("No need to start water pump");
+        pumpOperationState = 100;  // Skip pump operation
       }
       break;
-    case 2:
-      ledcSetup(pumpPwmChannel, pumpPwmFrequency, pumpPwmResolution);   // configure the PWM signal functionalitites for controling the pump
-      ledcAttachPin(pumpPowerPin, pumpPwmChannel);     // attach a channel to one Pin for generating the PWM signal for controling the pump
-      batteryVoltageCompensationValue = -0.238 * batteryLevelVoltage + 1.833;  //calculate compensation value to always power the pump with 3.5V (lowest possible battery voltage), independet of the actual battery voltage 
-      if(pumpPowerMinCalibrationFlag == 1){ //dont change pump PWM while calibrating pump (min and max are almost the same -> +1 to avoid dividing by zero later)
-        pumpPwmDutyCycleMin = pumpPowerMin * batteryVoltageCompensationValue;
-        pumpPwmDutyCycleMax = pumpPowerMin * batteryVoltageCompensationValue + 1;   
+      
+    case 2:  // Configure pump
+      // Setup PWM for pump control
+      ledcSetup(PUMP_PWM_CHANNEL, PUMP_PWM_FREQUENCY, PUMP_PWM_RESOLUTION);
+      ledcAttachPin(PUMP_POWER_PIN, PUMP_PWM_CHANNEL);
+      
+      // Calculate voltage compensation based on battery level
+      batteryCompensation = -0.238 * batteryLevelVoltage + 1.833;
+      
+      // Set PWM duty cycle range based on calibration flags
+      if (pumpPowerMinCalibrationFlag == 1) {
+        // Fixed duty cycle for min power calibration
+        minDutyCycle = pumpPowerMin * batteryCompensation;
+        maxDutyCycle = minDutyCycle + 1;
       }
-      else if(pumpPowerMaxCalibrationFlag == 1){  //dont change pump PWM while calibrating pump (min and max are almost the same -> +1 to avoid dividing by zero later)
-        pumpPwmDutyCycleMin = pumpPowerMax * batteryVoltageCompensationValue;  
-        pumpPwmDutyCycleMax = pumpPowerMax * batteryVoltageCompensationValue + 1;   
+      else if (pumpPowerMaxCalibrationFlag == 1) {
+        // Fixed duty cycle for max power calibration
+        minDutyCycle = pumpPowerMax * batteryCompensation;
+        maxDutyCycle = minDutyCycle + 1;
       }
-      else{ //increase pump PWM during operation
-        pumpPwmDutyCycleMin = pumpPowerMin * batteryVoltageCompensationValue;  
-        pumpPwmDutyCycleMax = pumpPowerMax * batteryVoltageCompensationValue; 
-        if (waterFlowCalibrationFlag == 1){
-          pumpOperationDuration = 60000; // set pump duration to 60000 milliseconds (60 seconds)
+      else {
+        // Normal operation with ramp-up
+        minDutyCycle = pumpPowerMin * batteryCompensation;
+        maxDutyCycle = pumpPowerMax * batteryCompensation;
+        
+        // Set pump duration based on water amount
+        if (waterFlowCalibrationFlag == 1) {
+          pumpDuration = 60000;  // 60 seconds for calibration
         }
-        else{
-          pumpOperationDuration = 60000 * waterAmount / waterFlowCalibration;   //calculate how long the pump has to operate to pump the desired amount of water  --> mulitply by 60000 to get result in milliseconds
-          BLYNK_LOG("Amount of water to pump: %i mL", waterAmount);
+        else {
+          // Calculate duration based on desired water amount
+          pumpDuration = 60000 * waterAmount / waterFlowCalibration;
+          Serial.printf("Amount of water to pump: %d mL\n", waterAmount);
         }
       }
-      dutyCycleRestTime = pumpOperationDuration / (pumpPwmDutyCycleMax - pumpPwmDutyCycleMin);  //calculate after how many milliseconds the duty cycle has to be increased in steps of 1, so that it reaches the maximum duty cycle at the end of the pump duration
-      BLYNK_LOG("Pumping duration: %i milliseconds", pumpOperationDuration);
-      BLYNK_LOG("Starting pump PWM duty cycle at: %i", pumpPwmDutyCycleMin);
-      BLYNK_LOG("Ending pump PWM duty cycle at: %i", pumpPwmDutyCycleMax);
-      BLYNK_LOG("Increasing PWM duty cycle by 1 every: %i milliseconds", dutyCycleRestTime);
-      pumpPwmDutyCycle = pumpPwmDutyCycleMin;  //set duty cycle to the starting value
-      pumpOperationTime = millis();  //reset the pump timer to current time 
-      previousDutyCycleIncreaseTime = millis();  //reset the duty cycle increase timer to current time
-      pumpActivityFlag = 1; 
-      BLYNK_LOG("Starting water pump... (Push the hardware button to cancel)");
+      
+      // Calculate time between duty cycle steps
+      dutyCycleStepTime = pumpDuration / (maxDutyCycle - minDutyCycle);
+      
+      Serial.printf("Pump duration: %d ms\n", pumpDuration);
+      Serial.printf("Starting PWM duty cycle: %d\n", minDutyCycle);
+      Serial.printf("Final PWM duty cycle: %d\n", maxDutyCycle);
+      
+      dutyCycle = minDutyCycle;
+      pumpStartTime = millis();
+      lastDutyCycleStepTime = millis();
+      pumpActivityFlag = 1;
+      
+      Serial.println("Starting water pump... (Push button to cancel)");
       pumpOperationState++;
       break;
-    case 3:
-      if (millis() - pumpOperationTime < pumpOperationDuration){    //as long as the pump duration has not been reached...
-        ledcWrite(pumpPwmChannel, pumpPwmDutyCycle);  //send PWM signal with current duty cycle to operate the pump
-        if(pumpPwmDutyCycle < pumpPwmDutyCycleMax && millis() - previousDutyCycleIncreaseTime >= dutyCycleRestTime){  //if the maximum duty cycle hasnt been reached and its time for a new increase...
-          previousDutyCycleIncreaseTime = millis();   //reset the duty cyle increase timer to current time 
-          BLYNK_LOG("Current pump PWM duty cycle: %i", pumpPwmDutyCycle);
-          pumpPwmDutyCycle++;  //slowly increase the duty cycle
-        }     
+      
+    case 3:  // Run pump with gradual power increase
+      if (millis() - pumpStartTime < pumpDuration) {
+        // Run pump at current duty cycle
+        ledcWrite(PUMP_PWM_CHANNEL, dutyCycle);
+        
+        // Gradually increase power
+        if (dutyCycle < maxDutyCycle && millis() - lastDutyCycleStepTime >= dutyCycleStepTime) {
+          lastDutyCycleStepTime = millis();
+          dutyCycle++;
+        }
       }
-      if (millis() - pumpOperationTime >= pumpOperationDuration || digitalRead(buttonPin) == LOW){  //after the pump duration has been reached OR if the pump was stopped manually by pushing the button
-        ledcWrite(pumpPwmChannel, 0);  //turn off the pump by sending a PWM signal with a duty cycle of zero
-        BLYNK_LOG("Water pumping has finished or was canceled manually by pushing the hardware button");
-        pumpOperationState = 100; //mark task as finished
+      
+      // Stop pump when duration reached or button pressed
+      if (millis() - pumpStartTime >= pumpDuration || digitalRead(BUTTON_PIN) == LOW) {
+        ledcWrite(PUMP_PWM_CHANNEL, 0);  // Turn off pump
+        Serial.println("Pump operation complete or manually cancelled");
+        pumpOperationState = 100;  // Mark as finished
       }
       break;
   }
 }
 
-
-
-
-
-
-void DeepSleep() {
-  Blynk.disconnect(); 
-  WiFi.mode(WIFI_OFF); //this is needed to reduce power consumption during deep sleep if there is a ext0 wakeup source defined (ext1 would work without this line)
-  adc_power_off();  //this is needed to reduce power consumption during deep sleep if there is a ext0 wakeup source defined (ext1 would work without this line)
-  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, LOW); //wakup after timer runs out or pin gets pulled low by pressing the wakeup-button (GPI0_NUM_PinNumber has to be written this way)
-  esp_sleep_enable_timer_wakeup(sleepDuration * secondsToMikroseconds * 60); //set sleep timer (in minutes)
-  BLYNK_LOG("Going to sleep for %i seconds or until hardware button is pressed...", sleepDuration);
-  esp_deep_sleep_start(); //start deepsleep
+void enterDeepSleep() {
+  Blynk.disconnect();
+  WiFi.mode(WIFI_OFF);
+  adc_power_off();
+  
+  // Enable wakeup sources
+  esp_sleep_enable_ext0_wakeup(GPIO_NUM_0, LOW);  // Button press wakeup
+  esp_sleep_enable_timer_wakeup(sleepDuration * MINUTES_TO_SECONDS * SECONDS_TO_MICROSECONDS);
+  
+  Serial.printf("Going to sleep for %d minutes or until button press...\n", sleepDuration);
+  esp_deep_sleep_start();
 }
 
-
-
-
-
-
-
-
-
-
-void loop() {
-  downloadBlynk();
-  uploadBlynk();
-  batteryLevelMeasure();
-  waterLevelMeasure();
-  soilMoistureMeasure();
-  pumpOperation();
-  routine();
-  if(BlynkInitialized == true){
-    BlynkEdgent.run();
+void printSensorValues() {
+  Serial.printf("Battery: %d%% (%.2fV)\n", batteryLevelPercentage, batteryLevelVoltage);
+  Serial.printf("Water level: %d%%\n", waterLevelPercentage);
+  Serial.printf("Soil moisture: %d%%\n", soilMoisturePercentage);
+  
+  if (waterLevelSensorRawReadingsFlag == 1) {
+    Serial.println("Water level raw readings:");
+    for (int i = 0; i < 5; i++) {
+      Serial.printf("  %d%%: %d\n", WATER_LEVEL_VALUES[i], waterLevelSensorReading[i]);
+    }
   }
-  timer.run(); // Initiates BlynkTimer
+}
+
+// Blynk connection handler
+BLYNK_CONNECTED() {
+  if (blynkSyncRequired) {
+    Serial.println("Syncing with Blynk server");
+    // Download all config values from Blynk
+    Blynk.syncVirtual(V105, V106, V107, V0, V1, V2, V10, V3, V4, V5, V6, V7, V8, V9, V11);
+  } 
+  else {
+    Serial.println("Uploading values to Blynk server");
+    // Upload sensor readings to Blynk
+    Blynk.virtualWrite(V102, batteryLevelPercentage);  // Battery level
+    Blynk.virtualWrite(V101, waterLevelPercentage);    // Water level
+    Blynk.virtualWrite(V100, soilMoisturePercentage);  // Soil moisture
+    
+    // Upload raw water level readings if requested
+    if (waterLevelSensorRawReadingsFlag == 1) {
+      for (int i = 0; i < 5; i++) {
+        Blynk.virtualWrite(V12 + i, waterLevelSensorReading[i]);
+      }
+      Blynk.virtualWrite(V11, 0);  // Reset flag
+    }
+    
+    // Upload calibration values if flags are set
+    if (soilMoistureCalibrationAirFlag == 1) {
+      Blynk.virtualWrite(V5, soilMoistureCalibrationAir);
+      Blynk.virtualWrite(V7, 0);  // Reset flag
+    }
+    
+    if (soilMoistureCalibrationWaterFlag == 1) {
+      Blynk.virtualWrite(V6, soilMoistureCalibrationWater);
+      Blynk.virtualWrite(V8, 0);  // Reset flag
+    }
+    
+    // Upload pump activity status
+    Blynk.virtualWrite(V103, pumpActivityFlag);
+    
+    // Reset calibration flags on server
+    if (pumpPowerMinCalibrationFlag == 1 || pumpPowerMaxCalibrationFlag == 1 || waterFlowCalibrationFlag == 1) {
+      Blynk.virtualWrite(V4, 0);
+      Blynk.virtualWrite(V2, 0);
+      Blynk.virtualWrite(V10, 0);
+    }
+    
+    // Upload boot count
+    Blynk.virtualWrite(V104, bootCount);
+  }
+}
+
+// Blynk handlers for receiving configuration values
+BLYNK_WRITE(V0) {
+  pumpPowerMin = param.asInt();
+  Serial.printf("Updated min pump power: %d\n", pumpPowerMin);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V1) {
+  pumpPowerMax = param.asInt();
+  Serial.printf("Updated max pump power: %d\n", pumpPowerMax);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V2) {
+  pumpPowerMinCalibrationFlag = param.asInt();
+  Serial.printf("Updated min pump power calibration flag: %d\n", pumpPowerMinCalibrationFlag);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V3) {
+  waterFlowCalibration = param.asInt();
+  Serial.printf("Updated water flow calibration: %d\n", waterFlowCalibration);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V4) {
+  waterFlowCalibrationFlag = param.asInt();
+  Serial.printf("Updated water flow calibration flag: %d\n", waterFlowCalibrationFlag);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V5) {
+  soilMoistureCalibrationAir = param.asInt();
+  Serial.printf("Updated soil moisture calibration (air): %d\n", soilMoistureCalibrationAir);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V6) {
+  soilMoistureCalibrationWater = param.asInt();
+  Serial.printf("Updated soil moisture calibration (water): %d\n", soilMoistureCalibrationWater);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V7) {
+  soilMoistureCalibrationAirFlag = param.asInt();
+  Serial.printf("Updated soil moisture calibration (air) flag: %d\n", soilMoistureCalibrationAirFlag);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V8) {
+  soilMoistureCalibrationWaterFlag = param.asInt();
+  Serial.printf("Updated soil moisture calibration (water) flag: %d\n", soilMoistureCalibrationWaterFlag);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V9) {
+  waterLevelSensorThreshold = param.asInt();
+  Serial.printf("Updated water level sensor threshold: %d\n", waterLevelSensorThreshold);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V10) {
+  pumpPowerMaxCalibrationFlag = param.asInt();
+  Serial.printf("Updated max pump power calibration flag: %d\n", pumpPowerMaxCalibrationFlag);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V11) {
+  waterLevelSensorRawReadingsFlag = param.asInt();
+  Serial.printf("Updated water level raw readings flag: %d\n", waterLevelSensorRawReadingsFlag);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V104) {
+  int bootCountServer = param.asInt();
+  if (bootCount == bootCountServer) {
+    Serial.println("Upload to Blynk server confirmed");
+    uploadBlynkState = 100;  // Mark upload as complete
+  }
+}
+
+BLYNK_WRITE(V105) {
+  sleepDuration = param.asInt();
+  Serial.printf("Updated sleep duration: %d minutes\n", sleepDuration);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V106) {
+  soilMoistureCritical = param.asInt();
+  Serial.printf("Updated critical soil moisture: %d%%\n", soilMoistureCritical);
+  blynkSyncCounter++;
+}
+
+BLYNK_WRITE(V107) {
+  waterAmount = param.asInt();
+  Serial.printf("Updated water amount: %d mL\n", waterAmount);
+  blynkSyncCounter++;
 }
